@@ -246,6 +246,50 @@ swiftc -o build/bleprobe mac/BLEProbe.swift
 └── data/                     # BLE 抓包/扫描（含真实 UUID/MAC，gitignored）
 ```
 
+## Investment Intelligence Terminal
+
+`tools/investment_terminal.py` 从东方财富读取 NDX、SPX、CSI300、VIX、US10Y 和 USD/CNY；从 FRED CSV 读取 10 年期实际利率（DFII10）、高收益债 OAS（BAMLH0A0HYM2）和 VIX 历史序列，并从 Convex 免费 CSV 读取 MOVE（CC BY 4.0）。本地计算 NDX 52 周回撤、相对 200DMA 偏离、VIX 分位，以及基于 VIX、HY OAS、实际利率和 NDX 回撤四项过去一年分位数的 0–4 跨资产压力分数。MOVE 源若超过 7 个自然日未更新，会在屏上标记 `STALE`，并从跨资产压力分数中排除。无需连接证券账户。
+
+### Screen preview
+
+![Investment terminal on a 400×300 BWR e-paper display](design/investment-intelligence-preview.png)
+
+### 屏幕指标怎么读
+
+| 指标 | 含义 |
+|---|---|
+| `NDX` | 纳斯达克100指数，偏大型科技与成长公司。旁边的百分比是最近一个交易日涨跌幅。 |
+| `SPX` | 标普500指数，观察美国大型公司的整体走势。 |
+| `CSI300` | 沪深300指数，观察A股大盘股走势。 |
+| `VIX` | 由标普500期权价格推导的未来约一个月预期波动率。数值越高，市场通常越紧张。 |
+| `VIX PCT` | VIX 在过去约252个交易日中的分位。例如57%表示当前值高于这段历史中约57%的交易日；它不是上涨或下跌概率。 |
+| `US10Y` | 美国10年期名义国债收益率，是长期美元利率的参考。 |
+| `US10Y REAL` | 美国10年期通胀保值国债收益率，近似衡量扣除通胀后的实际利率。实际利率较高时，远期现金流折现压力较大，高估值成长股通常更敏感。 |
+| `HY SPREAD` | 美国高收益债期权调整利差（OAS），即高收益债相对基准国债的额外收益率。利差走阔通常表示信用风险担忧上升。 |
+| `MOVE` | 美国国债期权隐含波动率指数，可与VIX一起观察债市和股市的预期波动。免费数据源超过7个自然日未更新时，数值标为 `STALE`，不能当作最新行情。 |
+| `NDX 52W DD` | 纳指100相对过去252个交易日最高点的回撤。例如 -4.5% 表示比这一年高点低约4.5%，不是当天跌幅。 |
+| `NDX vs 200DMA` | 纳指100相对过去200个交易日均线的偏离百分比。正数表示指数在均线上方，负数表示在均线下方；它描述趋势，不预测未来。 |
+| `USD/CNY FIX` | 东方财富提供的美元兑人民币中间价及其日变化，不是银行对个人客户的实际换汇报价。 |
+
+### CROSS-ASSET STRESS 怎么算
+
+它是本地计算的风险提示，不是官方指数或买卖信号。系统在共同的宏观数据日期上，分别计算 VIX、高收益债 OAS、10年期实际利率和纳指52周回撤在过去约252个交易日中的分位。每项达到或超过80分位（处于过去一年较高的20%区间）记1分，合计为 `0/4` 到 `4/4`：0分 `CALM`、1分 `WATCH`、2分 `ELEVATED`、3–4分 `HIGH`。MOVE 不纳入这个分数，因为当前免费数据源更新可能滞后。
+
+数据时间并不完全一致：美股行情、亚洲盘中报价、每日发布的FRED宏观序列各有更新时间。屏幕分别显示更新时间或数据日期；压力分数使用VIX、OAS、实际利率和纳指历史数据共同可用的最近日期。断网时程序会回退到上次成功缓存，因此应结合日期判断新旧。
+
+在 WSL 中生成并刷新 PNG：
+
+```bash
+cd /path/to/epaper-finance-terminal
+python3 tools/investment_terminal.py
+```
+
+输出为 `design/investment-intelligence-preview.png`，最近一次成功数据保存在 `data/investment-terminal-cache.json`。断网时会使用本地缓存，并在 stderr 提示。
+
+Windows 任务计划程序中的 `Investment Terminal Epaper Refresh` 已配置为工作日 08:30–11:30 和 13:00–18:00 每 30 分钟刷新一次。任务需要当前用户已登录，以便使用本机 BLE；脚本位于 `windows/refresh-investment-terminal.ps1`，运行日志写入 `data/out/investment-terminal-refresh.log`。
+
+使用的是东方财富网页公开行情接口，非带 SLA 的正式开发者 API；接口字段或访问策略变化时需要调整取数代码。美国国债收益率也可在[东方财富中美国债收益率数据页](https://data.eastmoney.com/cjsj/zmgzsyl.html)查看。
+
 ## 安全说明
 
 - 额度凭据从**本机用户目录**的 `auth.json` / 环境变量读取，**源码里不保存任何密钥**。
@@ -254,4 +298,4 @@ swiftc -o build/bleprobe mac/BLEProbe.swift
 
 ## 许可
 
-[MIT](LICENSE) © e-paper contributors. 第三方字体（Roboto，Apache 2.0）与本文许可证无关，见 `fonts/`。
+[MIT](LICENSE) © e-paper contributors. 第三方字体（Roboto，Apache 2.0；Spleen，BSD 2-Clause）与本文许可证无关，见 `fonts/`。
