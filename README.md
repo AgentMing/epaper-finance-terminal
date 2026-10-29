@@ -1,301 +1,83 @@
-# ZKC42V e-paper DIY driver (macOS)
+# E-Paper Finance Terminal
 
-> 在 macOS 上通过 CoreBluetooth 直接驱动 Zkong Valley **ZKC42V** 4.2" 三色电子墨水价签（400x300 BWR）。
-> 逆向官方协议后无需官方 App，直接用 Mac 推图、显示 AI 额度面板（含农历/节气/干支 + 道德经每日一句）。
+A local market-risk dashboard for the **ZKC42V 4.2-inch, 400×300 black/white/red e-paper display**. It fetches public market data, calculates a few context indicators locally, renders a pixel-font PNG, and can send the frame over Bluetooth LE. No brokerage account is needed.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![E-Paper Finance Terminal screen preview](design/investment-intelligence-preview.png)
 
-## 特性
+## What the screen shows
 
-- 🔗 **纯 BLE 直连**：绕过官方云端/App，CoreBluetooth 直接推帧显示。
-- 🖼 **传任意图片** `img`，及 `INIT(model)+SET_SLOT+WRITE_IMG(0x30,RLE)+REFRESH(0x05)` 协议。
-- 📊 **AI 额度面板** `quotas`：codex / grok / kimi / opencode-go / Ollama Pro / Windsurf（Devin）六行实时额度 + 相对重置时间。
-- 🎨 **Apple 风格排版**：白底 tile + 单一红色强调；头部大号时间 + 农历/节气/干支；底部随机《道德经》一句 + 白话（本地缓存，无需联网）。
-- 🕘 **差量刷新 + 定时窗口**：数据没变自动跳过推送；`--start/--end` 限定活跃时段省电。
-- 🔬 **逆向工具链**：`scan` / `inspect` / `cmd` / `seq` / `server`（模拟官方 App）。
-
-## 快速开始
-
-```bash
-# 1) 构建 BLE 工具
-swiftc -o build/bleprobe mac/BLEProbe.swift
-
-# 2) 扫描并找到你的价签 UUID
-./epaper.sh scan
-
-# 3) 设好环境变量后推送任意图片
-EPAPER_UUID=<你的UUID> ./epaper.sh img photo.png
-```
-
-**依赖**：macOS + Python 3（Pillow）；额度面板还用到 `lunar_python`（农历）：
-```bash
-pip3 install pillow lunar_python
-```
-
-## 目录
-
-- `mac/BLEProbe.swift` — BLE 扫描 + GATT Profile 分析工具
-  - `scan <seconds>`：扫描并列出附近 BLE 设备（含完整广播包 hex），保存 `data/scan-<ts>.json`
-  - `inspect <UUID>`：连接指定设备，导出 Services / Characteristics / 可读属性，保存 `data/profile-<uuid>.json`
-  - `cmd <UUID> <char> <hex>`：连接并写单条命令
-  - `seq <UUID> <listen> <char:hex>...`：连接后顺序写入多条命令，监听响应
-  - `send <UUID> <frame> [--init]`：连价签并按 EPD-nRF5 0x30 帧协议发送图像
-  - `partial <UUID> <old-frame> <new-frame>`：实验性 SSD1619 窗口局部刷新（失败/不适合时整屏回退）
-  - `server <MAC> [frame]`：模拟官方 ZkongESL App（GATT Server + 广播），价签主动连接
-- `data/`：扫描与抓包结果
-
-## 逆向结论（2026-08-08）
-
-### 硬件
-- 主控：GigaDevice **GR5513**，固件 `v1.10-gr5513`（读特征 `62750003` 得到）
-- 屏幕：400x300 BWR（黑/白/红），SSD1619 类控制器
-
-### 价签上的 GATT（价签 = server，广播服务 `62750001`）
-- `62750002`：命令通道（write + notify），EPD-nRF5 风格命令；连接后回状态文本
-  `slots=7 1 0`、`clock_enable=1`、`sid=...`、`mtu=244 rle=1`、`t=...`
-- `62750003`：只读固件版本
-- `A6ED0401`：数据服务（`A6ED0402` notify / `A6ED0403` writeNoResp / `A6ED0404` writeNoResp+indicate）
-
-### 官方 App（ZkongESL 7.2.0，已反编译）的传图协议
-**方向与直觉相反**：手机是 GATT Server，价签是 client。
-1. App 调云端 `getDataByUuid` 拿到 Base64 图片数据 + 价签真实 MAC
-2. 手机广播服务 `0783B03E-8535-B5A0-7140-A304D2495CB7`，厂商数据含价签 MAC
-   （`[crc8, 0x06, 0x08, mac1..mac6]`，crc = XOR of {06,08,mac...}）
-3. 价签扫描到自己的 MAC → 主动连接手机
-4. MTU 协商后 `chunk = mtu - 20`（230B），手机按块 notify 到
-   `0783B03E-...-5CB8`，价签 write ≥35B 回 ACK 流控，发完 <35B 确认
-
-### 结论 / 状态（✅ 已打通）
-
-**成功：Mac 直接驱动价签显示图片 + 时钟！**
-
-关键步骤（来自 epdiy.cn 官方 Web 客户端逆向）：
-1. `INIT(0x01, model=0x02)` — 初始化 SSD1619 三色面板（必须带模型参数！）
-2. `SET_SLOT(0x31, [0, 0])` — 先选中槽位 0 才能写图（之前全黑的根因）
-3. `WRITE_IMG(0x30, RLE flags)` — 平面按 RLE 压缩，flags：
-   - 首块：`0x04 | 0x02 | (bw?0:1)`
-   - 续块：`0x04 | (bw?0:1)`
-4. `REFRESH(0x05)`
-
-实测：黑底白字时钟图成功显示。固件 `rle=1` 必须用 RLE 压缩传输。
-
-### 显示一下又变白 / 变黑？
-
-| 现象 | 常见原因 | 处理 |
-|------|----------|------|
-| 先有图再**变白** | `SET_TIME`/日历模式强制 GUI 刷新（picture 模式会 fill 白）；或槽位轮播切到空槽 | 别跑 `time 1/2`；`send` 默认 `SET_SLIDE off`；同步时间后再推一次图 |
-| 先有图再**变黑** | 发送末尾误发 `SLEEP(0x06)`（本固件会黑屏）；或 `INIT`/缺 `SET_SLOT` | 当前 `send` **不再发 SLEEP**；保持 `INIT(model)+SET_SLOT+WRITE+REFRESH` |
-| `clock_enable=1` | 若进了时钟模式会每分钟全刷 | 不要 `./epaper.sh time 2`；只用 `img`/`quotas` |
-
-环境变量：`EPAPER_SET_SLIDE_OFF=0` 可关掉「关轮播」命令（默认开）。
-
-## 一键工具
-
-```bash
-./epaper.sh img clock.png     # 传任意图片
-./epaper.sh clock             # 显示当前时间(黑底白字)
-./epaper.sh quotas            # 拉取 codex/grok/kimi/opencode-go/Ollama Pro/Windsurf 额度并显示
-./epaper.sh quotas --no-send  # 只生成 400×300 PNG + frame，不推 BLE
-./epaper.sh quotas-loop 900   # 每 900 秒刷新额度面板（默认 15 分钟）
-./epaper.sh quotas-loop 900 --start 09:00 --end 18:00   # 仅早九晚六刷新
-./epaper.sh time              # 同步价签内部时钟
-./epaper.sh scan              # 扫 BLE 设备
-```
-
-### 布局设计器（在线拖拽）
-
-`design/index.html` 是一个**本地单文件**拖拽式排版工具（浏览器直接打开即可，无需安装）：
-
-- 400×300 画布，块（标题/时间、六个额度行、道德经）可**拖动移动**、右下角**缩放**、侧栏改**字体字号/颜色开关/边框**、增删块。
-- 用示例额度数据**实时渲染 BWR 预览**，所见即所得（像素严格黑/白/红三色）。
-- 「导出 JSON」把布局存为 `data/layout.json`；「导入 JSON」可回读或粘贴改过的配置。
-- 本地渲染时用 `--layout` 指定布局文件（缺省不传则用内置排版）：
-
-```bash
-# 设计页导出 data/layout.json 后：
-./epaper.sh quotas --layout data/layout.json
-python -m quotas --out-dir data/out --layout data/layout.json --send
-```
-
-布局 JSON 与 `tools/quotas/layout.py` 的 `render_layout()` 一一对应，块坐标即面板坐标。
-内置默认排版见 `tools/quotas/layout.py` 的 `DEFAULT_LAYOUT`（与 `quotas` 无参渲染完全一致，单测 `test_render_layout_default_matches_builtin` 保证）。
-
-### AI 额度面板（quotas）
-
-从本机已登录凭据读取额度（**不**在源码里写密钥）：
-
-| 服务 | 凭据位置 | 数据源 |
-|------|----------|--------|
-| codex | `~/.codex/auth.json` | `GET chatgpt.com/backend-api/codex/usage` |
-| grok | `~/.grok/auth.json` | `GET cli-chat-proxy.grok.com/v1/billing?format=credits` |
-| kimi | `KIMI_API_KEY` / `KIMI_CODING_API_KEY`，或 `~/.kimi-code/credentials/kimi-code.json`（kimi-code 登录 OAuth） | `GET api.kimi.com/coding/v1/usages`；OAuth 过期走 `auth.kimi.com/api/oauth/token` 刷新 |
-| opencode-go | `~/.local/share/opencode/auth.json`；完整窗口需 `OPENCODE_GO_WORKSPACE_ID` + `OPENCODE_GO_AUTH_COOKIE` | 仪表盘 scrape 或 key 探测 |
-| ollama-pro | `OLLAMA_API_KEY`（也支持 `OLLAMA_PRO_API_KEY`） | `GET ollama.com/api/usage`；session/weekly `usage` 比例转换为剩余百分比 |
-| windsurf / Devin | Windsurf/Devin `state.vscdb`、`credentials.toml`，或 `DEVIN_BEARER_TOKEN` + `DEVIN_ORG` | Codeium SeatManagement 或 `app.devin.ai/.../billing/quota/usage`；日/周订阅额度剩余百分比 |
-
-单个服务失败只显示 error/unavailable，不会中断其它行。
-
-Ollama Pro 使用官方 API key 环境变量，启动额度刷新前设置一次即可：
-
-```bash
-export OLLAMA_API_KEY='<你的 Ollama API key>'
-./epaper.sh quotas
-```
-
-Windows PowerShell：
-
-```powershell
-$env:OLLAMA_API_KEY = '<你的 Ollama API key>'
-python -m quotas --out-dir data/out --send --bleprobe bleprobe.py
-```
-
-`/api/usage` 当前返回 session（约 5 小时）和 weekly（7 天）两个使用比例；若接口未返回精确重置时间，面板对应时间位置显示 `—`，不会猜测时间。
-
-Windsurf/Devin 订阅额度默认从桌面端的 `state.vscdb` 或 CLI `credentials.toml` 读取登录凭据，
-也可以设置 `WINDSURF_API_KEY`；Devin 网页额度接口则使用 `DEVIN_BEARER_TOKEN`（或
-`DEVIN_AUTHORIZATION`）配合 `DEVIN_ORG`。接口返回日额度和周额度的剩余百分比，面板分别显示为
-`day` 和 `wk`；本地缓存只在云端查询失败时使用。`DEVIN_API_KEY`（`apk_user_`）是 Devin
-会话 REST key，官方没有把自助订阅 quota 暴露在该 API 上，因此不会误发到额度接口。
-
-额度与时间均本地化显示：剩余额度统一百分比、重置时间显示为相对时间（`3天2时` / `35分`）；
-顶部显示小字号农历 + 节气 + 天干地支，以及沪指/深成指/标普/纳指当日涨跌；行情取不到时使用上次本地缓存。
-底部随机显示一句《道德经》（`tools/quotas/daodejing.json` 本地缓存）。
-
-每次成功渲染会保存一份不含密钥的本地历史快照；有上次快照时，额度旁显示剩余百分比的 delta，
-例如 `Δ-2.0` 表示比上次刷新少 2 个百分点，首次刷新没有 delta。
-同时保存当天的刷新采样到 `epaper-quotas-history.json`，每个订阅右侧只显示一条总用量（已用百分比）折线图；
-曲线旁的 plan 数值与 delta 使用更大的字体，顶部另显示沪/深/标普/纳指的当日涨跌；当天第一次刷新只有一个点，跨到新的一天会自动清空旧曲线。
-
-差量刷新分两层：默认模式仍比较上一次额度快照，数据没变就跳过 BLE 推送；
-`./epaper.sh quotas --force` 可强制推送（比如想更新头部时间戳）。
-
-实验性局部刷新可显式开启：
-
-```bash
-# 先用上一帧建立基准；没有上一帧时自动整屏发送
-python -m quotas --out-dir data/out --send --partial --bleprobe bleprobe.py
-
-# 允许测试 BWR 红色平面局部刷新；需要确认具体面板波形可靠后再使用
-python -m quotas --out-dir data/out --send --partial --partial-red --bleprobe bleprobe.py
-```
-
-局部刷新状态保存在 `epaper-quotas-last-frame.bin`。发送前比较黑/红两个平面，
-将变化区域按 8 像素 X 边界切成窗口，通过 SSD1619 原始命令 `0x03/0x04` 写入，
-再用局部更新序列激活。变化面积过大、矩形过多或红色平面变化（未指定
-`--partial-red`）时自动走原有完整 `0x30/0x05` 刷新。当前 GR5513 固件是否允许
-原始命令透传、以及 BWR 面板是否支持可靠红色局部波形，仍需在实机上验证。
-
-Windows 本机任务 `AI Quota Epaper Refresh` 默认使用原有整屏刷新；局部刷新仅在
-手动显式传入 `--partial`（以及需要时 `--partial-red`）时启用。局部传输仍需在
-实机上验证，失败、变化面积过大或矩形过多时会回退完整刷新。
-
-定时刷新（二选一）：
-
-```bash
-# A) 进程内循环（默认 900s）；可加活跃时段，窗口外自动跳过刷新
-./epaper.sh quotas-loop 900
-./epaper.sh quotas-loop 900 --start 09:00 --end 18:00   # 早九晚六
-./epaper.sh quotas-loop 900 --start 22:00 --end 06:00   # 跨午夜
-
-# B) launchd（StartInterval=900）
-cp launchd/com.local.epaper-quotas.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.local.epaper-quotas.plist
-```
-
-单元测试：
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-## 构建
-
-```bash
-swiftc -o build/bleprobe mac/BLEProbe.swift
-```
-
-## 使用
-
-```bash
-./epaper.sh img photo.png
-./epaper.sh clock
-./epaper.sh quotas
-./epaper.sh time
-```
-
-## 目录结构
-
-```
-.
-├── epaper.sh                 # 一键入口（img/clock/quotas/quotas-loop/time/scan/...）
-├── mac/BLEProbe.swift        # BLE 扫描/GATT 分析/推帧 Swift 工具
-├── build/bleprobe            # 编译出的二进制（gitignored）
-├── tools/
-│   ├── make_image.py         # PNG → 400x300 BWR frame.bin 平面转换
-│   ├── clock_image.py        # 时钟图生成
-│   └── quotas/               # AI 额度面板
-│       ├── cli.py            # CLI + 差量刷新 + 定时窗口
-│       ├── fetch.py          # 各 provider 额度拉取
-│       ├── layout.py         # Apple 风格渲染 + 农历/节气 + 道德经栏
-│       ├── credentials.py    # 本地凭据发现（密钥永不输出）
-│       └── daodejing.json    # 道德经本地缓存
-├── fonts/Roboto.ttf          # 英文字体（网络下载，随包附带）
-├── launchd/                  # 定时刷新 LaunchAgent 模板
-├── design/index.html         # 在线拖拽式布局设计器（单文件，浏览器直接打开）
-├── tests/                    # 单元测试
-└── data/                     # BLE 抓包/扫描（含真实 UUID/MAC，gitignored）
-```
-
-## Investment Intelligence Terminal
-
-`tools/investment_terminal.py` 从东方财富读取 NDX、SPX、CSI300、VIX、US10Y 和 USD/CNY；从 FRED CSV 读取 10 年期实际利率（DFII10）、高收益债 OAS（BAMLH0A0HYM2）和 VIX 历史序列，并从 Convex 免费 CSV 读取 MOVE（CC BY 4.0）。本地计算 NDX 52 周回撤、相对 200DMA 偏离、VIX 分位，以及基于 VIX、HY OAS、实际利率和 NDX 回撤四项过去一年分位数的 0–4 跨资产压力分数。MOVE 源若超过 7 个自然日未更新，会在屏上标记 `STALE`，并从跨资产压力分数中排除。无需连接证券账户。
-
-### Screen preview
-
-![Investment terminal on a 400×300 BWR e-paper display](design/investment-intelligence-preview.png)
-
-### 屏幕指标怎么读
-
-| 指标 | 含义 |
+| Display | Meaning |
 |---|---|
-| `NDX` | 纳斯达克100指数，偏大型科技与成长公司。旁边的百分比是最近一个交易日涨跌幅。 |
-| `SPX` | 标普500指数，观察美国大型公司的整体走势。 |
-| `CSI300` | 沪深300指数，观察A股大盘股走势。 |
-| `VIX` | 由标普500期权价格推导的未来约一个月预期波动率。数值越高，市场通常越紧张。 |
-| `VIX PCT` | VIX 在过去约252个交易日中的分位。例如57%表示当前值高于这段历史中约57%的交易日；它不是上涨或下跌概率。 |
-| `US10Y` | 美国10年期名义国债收益率，是长期美元利率的参考。 |
-| `US10Y REAL` | 美国10年期通胀保值国债收益率，近似衡量扣除通胀后的实际利率。实际利率较高时，远期现金流折现压力较大，高估值成长股通常更敏感。 |
-| `HY SPREAD` | 美国高收益债期权调整利差（OAS），即高收益债相对基准国债的额外收益率。利差走阔通常表示信用风险担忧上升。 |
-| `MOVE` | 美国国债期权隐含波动率指数，可与VIX一起观察债市和股市的预期波动。免费数据源超过7个自然日未更新时，数值标为 `STALE`，不能当作最新行情。 |
-| `NDX 52W DD` | 纳指100相对过去252个交易日最高点的回撤。例如 -4.5% 表示比这一年高点低约4.5%，不是当天跌幅。 |
-| `NDX vs 200DMA` | 纳指100相对过去200个交易日均线的偏离百分比。正数表示指数在均线上方，负数表示在均线下方；它描述趋势，不预测未来。 |
-| `USD/CNY FIX` | 东方财富提供的美元兑人民币中间价及其日变化，不是银行对个人客户的实际换汇报价。 |
+| `NDX`, `SPX`, `CSI300` | Nasdaq 100, S&P 500, and CSI 300 index levels and daily changes. |
+| `VIX` | Option-implied expected volatility for the S&P 500 over roughly the next month. Higher readings usually mean greater expected market swings. |
+| `VIX PCT` | VIX's percentile over about 252 trading days. `57%` means the current reading is above roughly 57% of readings in that period; it is not a probability of a market move. |
+| `US10Y` | U.S. 10-year nominal Treasury yield. |
+| `US10Y REAL` | U.S. 10-year inflation-indexed Treasury yield, a measure of real interest rates. Higher real rates can put more discount-rate pressure on long-dated cash flows. |
+| `HY SPREAD` | U.S. high-yield corporate bond option-adjusted spread (OAS) over Treasuries. A wider spread usually signals greater concern about credit risk. |
+| `MOVE` | Implied volatility in U.S. Treasury options, the bond-market counterpart to VIX. The free feed is marked `STALE` when its latest observation is more than seven calendar days old. |
+| `NDX 52W DD` | Nasdaq 100 drawdown from its highest close in the last 252 sessions. `-4.5%` means it is 4.5% below that high, not that it fell 4.5% today. |
+| `NDX vs 200DMA` | Nasdaq 100's percentage distance from its 200-session moving average. Positive means above the average; negative means below. It describes the current trend and does not predict the next move. |
+| `USD/CNY FIX` | EastMoney's USD/CNY central parity fixing and its daily change, not a bank's customer exchange rate. |
 
-### CROSS-ASSET STRESS 怎么算
+### Cross-asset stress score
 
-它是本地计算的风险提示，不是官方指数或买卖信号。系统在共同的宏观数据日期上，分别计算 VIX、高收益债 OAS、10年期实际利率和纳指52周回撤在过去约252个交易日中的分位。每项达到或超过80分位（处于过去一年较高的20%区间）记1分，合计为 `0/4` 到 `4/4`：0分 `CALM`、1分 `WATCH`、2分 `ELEVATED`、3–4分 `HIGH`。MOVE 不纳入这个分数，因为当前免费数据源更新可能滞后。
+`CROSS-ASSET STRESS` is a locally calculated context signal, not an official index or trading recommendation. On the latest common macro-data date, the program calculates trailing one-year percentiles for VIX, high-yield OAS, the 10-year real yield, and Nasdaq 100 drawdown. Each signal at or above its 80th percentile adds one point:
 
-数据时间并不完全一致：美股行情、亚洲盘中报价、每日发布的FRED宏观序列各有更新时间。屏幕分别显示更新时间或数据日期；压力分数使用VIX、OAS、实际利率和纳指历史数据共同可用的最近日期。断网时程序会回退到上次成功缓存，因此应结合日期判断新旧。
+- `0/4` — `CALM`
+- `1/4` — `WATCH`
+- `2/4` — `ELEVATED`
+- `3–4/4` — `HIGH`
 
-在 WSL 中生成并刷新 PNG：
+MOVE is displayed separately and is excluded from this score because its free data feed can lag.
+
+## Data sources and freshness
+
+- **EastMoney:** NDX, SPX, CSI 300, VIX, U.S. 10-year yield, and USD/CNY fixing. This uses EastMoney's public web quote and data endpoints, which do not provide a developer API SLA.
+- **FRED CSV:** 10-year real yield (`DFII10`), high-yield OAS (`BAMLH0A0HYM2`), and VIX daily history (`VIXCLS`). No API key is required for these CSV downloads.
+- **MOVE:** [Convex's public MOVE CSV](https://convex-trading-production.up.railway.app/metrics/move-index/data.csv), licensed CC BY 4.0. Attribution is included in the on-screen footer.
+
+Sources update on different schedules. U.S. index quotes, China session quotes, and daily macro series may refer to different observation times. The cross-asset score uses the latest date common to its four inputs. If a refresh fails, the renderer falls back to the last successful local snapshot; check the dates shown on screen and in the cache before relying on it.
+
+## Generate the PNG
+
+Run in WSL or another Python environment with network access:
 
 ```bash
-cd /path/to/epaper-finance-terminal
+python3 -m pip install requests Pillow
 python3 tools/investment_terminal.py
 ```
 
-输出为 `design/investment-intelligence-preview.png`，最近一次成功数据保存在 `data/investment-terminal-cache.json`。断网时会使用本地缓存，并在 stderr 提示。
+The preview is written to `design/investment-intelligence-preview.png`; the last successful data snapshot is stored in `data/investment-terminal-cache.json`. Runtime data and generated frames under `data/` are gitignored.
 
-Windows 任务计划程序中的 `Investment Terminal Epaper Refresh` 已配置为工作日 08:30–11:30 和 13:00–18:00 每 30 分钟刷新一次。任务需要当前用户已登录，以便使用本机 BLE；脚本位于 `windows/refresh-investment-terminal.ps1`，运行日志写入 `data/out/investment-terminal-refresh.log`。
+## Send a frame to the display
 
-使用的是东方财富网页公开行情接口，非带 SLA 的正式开发者 API；接口字段或访问策略变化时需要调整取数代码。美国国债收益率也可在[东方财富中美国债收益率数据页](https://data.eastmoney.com/cjsj/zmgzsyl.html)查看。
+On Windows, install the frame conversion and BLE dependencies:
 
-## 安全说明
+```powershell
+python -m pip install Pillow bleak
+```
 
-- 额度凭据从**本机用户目录**的 `auth.json` / 环境变量读取，**源码里不保存任何密钥**。
-- `credentials.py` 的 `redacted()` 保证日志/测试永不输出真实 token。
-- `data/` 含价签真实 UUID 与抓包，已在 `.gitignore` 中排除，**请勿提交**。
+Convert the preview and send it to the tag's BLE address:
 
-## 许可
+```powershell
+python tools/make_image.py design/investment-intelligence-preview.png --out data/investment-terminal-frame.bin
+python bleprobe.py send <BLE_ADDRESS> data/investment-terminal-frame.bin
+```
 
-[MIT](LICENSE) © e-paper contributors. 第三方字体（Roboto，Apache 2.0；Spleen，BSD 2-Clause）与本文许可证无关，见 `fonts/`。
+Replace `<BLE_ADDRESS>` with the address printed by `python bleprobe.py scan`. Keep the address local; do not commit it.
+
+## Scheduled refresh on Windows
+
+`windows/refresh-investment-terminal.ps1` refreshes the data through WSL, converts the PNG, and sends the frame over BLE. It reads the device address from the local, gitignored `data/quota-service.json`:
+
+```json
+{
+  "deviceAddress": "YOUR_TAG_BLE_ADDRESS"
+}
+```
+
+Create a Windows Task Scheduler task that runs this script while the user is logged in. Bluetooth LE access requires an interactive user session. The task on the original development machine runs on weekdays every 30 minutes from 08:30–11:30 and 13:00–18:00; this schedule is not automatically installed on other machines. Its log is written to `data/out/investment-terminal-refresh.log`.
+
+## License
+
+Project code is licensed under [MIT](LICENSE). The bundled Spleen bitmap fonts are under the [BSD 2-Clause License](fonts/Spleen-LICENSE.txt).
